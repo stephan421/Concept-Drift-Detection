@@ -1,0 +1,463 @@
+start_time <- Sys.time()
+
+library('lattice')
+library('ggplot2')    
+library('caret')    
+library('LiblineaR')
+library('kernlab')
+library('plyr')
+library('data.table')
+
+#User-Input
+#----------------------------------------------------------------------------------------------
+
+k = 48               #Batch Size
+v = 0.80             #High Accuracy Limit
+grenz = 0.9          #Limit for similar Batches
+grenz2 = 0.92        #once the number of similar Batches has reached "overfit" "grenz" get's set to "grenz2"
+good = 3             #number of Batches such that the current model gets saved
+overfit = 10         #max number of Batches in training set
+
+#Initialization
+#----------------------------------------------------------------------------------------------
+
+p = k
+begTest = 1          
+bonusBatch = 0       
+DOWNcount = 0        
+alteSVM = list()     
+M = matrix(1,2,1)   
+concept_laenge = c() 
+concept_zeit = c()   
+Zeit = c()           
+genau = c()         
+
+
+setwd('c:/Implementierung')
+
+Daten <- read.table(file = "elec2-Dataset-in-Excel-als-CSV.csv", sep = ';', header=TRUE)
+
+Daten = tail(Daten, n = (nrow(Daten) - 17760) ) #delete rows with missing attributes
+
+Daten = Daten[,-1] #delete date and weekday
+Daten = Daten[,-1]
+Daten = Daten[,-1] #delete period
+
+names(Daten)[names(Daten) == "Richtung"] <- "categorie"  
+
+
+z = nrow(Daten) / k  
+
+class = "svmLinear3"  
+
+
+#Pre-Processing
+#----------------------------------------------------------------------------------------------
+
+training <- head(Daten, n=k)
+
+mydf <- structure(training)
+setDT(mydf)
+
+if( nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 2){    
+DOWNcount = mydf[, .(`Number of rows` = .N), by = categorie][[1,2]]
+UPcount = mydf[, .(`Number of rows` = .N), by = categorie][[2,2]]
+}
+
+if( length(which(apply(training, 2, function(x) length(unique(x))) == 1)) != 0    
+    || DOWNcount < 3                                                              
+    || UPcount < 3){                                                        
+                                                                                  
+  for(i in 2:z){                                                                  
+                                                                                  
+    training <- head(Daten, n = i*k)   
+    mydf <- structure(training)
+    setDT(mydf)
+    DOWNcount = mydf[, .(`Number of rows` = .N), by = categorie][[1,2]]
+    UPcount = mydf[, .(`Number of rows` = .N), by = categorie][[2,2]]
+    
+    if( length(which(apply(training, 2, function(x) length(unique(x))) == 1)) == 0 || DOWNcount >= 3|| UPcount >= 3){break}
+    if( i == z ){ print("Warnung: Der Datensatz besitzt ein konstantes Attribut, um das er zunaechst bereinigt werden muss.") }
+  }
+}
+
+Rest <- tail(Daten, n = (nrow(Daten) - nrow(training)) ) 
+testing <- head(Rest, n=k) 
+
+mydf <- structure(testing)      
+setDT(mydf)
+
+inc = 1                         
+while(nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 1){      
+  
+  testing <- head(Rest, n = k + inc) 
+  mydf <- structure(testing)
+  setDT(mydf)
+  
+  inc = inc + 1
+}
+
+begTest = nrow(training) + nrow(testing)
+print("Der simulierte Datenfluss beginnt bei Zeile:")
+print(begTest)  
+begTest = begTest/k
+
+training[["categorie"]] = factor(training[["categorie"]]) 
+testing[["categorie"]] = factor(testing[["categorie"]])
+
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 6) 
+
+preprocessParams = preProcess(training, method=c("center","scale"))
+print(preprocessParams) 
+
+tTraining <- predict(preprocessParams, newdata = training) 
+
+tTesting <- predict(preprocessParams, newdata = testing)
+
+
+#SVM training
+#----------------------------------------------------------------------------------------------
+
+
+svm_Linear <- train(categorie ~., data = tTraining, method = class, 
+                    na.action = na.pass, scale = FALSE, trControl=trctrl, tuneLength = 10)
+
+
+print(svm_Linear)
+
+
+#making predictions for training
+#----------------------------------------------------------------------------------------------
+
+
+test_pred <- predict(svm_Linear, newdata = tTesting)
+
+confusionMatrix(table(test_pred, testing$categorie))
+cm <- confusionMatrix(table(test_pred, testing$categorie))
+
+
+
+#initial setup is done, now continue on simulated streaming data
+#----------------------------------------------------------------------------------------------
+
+overall.accuracy <- cm$overall[['Accuracy']]
+print(overall.accuracy)  
+
+g = c(1)  
+
+h = p 
+
+streak = 0 
+
+for(i in (begTest + 1):z){ #successively work on batches
+  
+  #create plot
+  
+  g = c(g,overall.accuracy) 
+  plot( g, type = "b", xlab = "Batch", ylab = "Accuracy", main = "Block")
+  abline(h=v, col="blue")
+  
+  if(overall.accuracy >= v){  
+                             
+    streak = streak + 1
+    
+    print(paste("Bereite Daten vor."))
+    
+    testing <- head(Daten, n = (i*k)) 
+    testing <- tail(testing, n = k) 
+    
+    mydf <- structure(testing)     
+    setDT(mydf)
+    
+    inc = 1                        
+    while(nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 1){ 
+      
+      
+      testing <- head(Daten, n = (i*k) + inc) 
+      testing <- tail(testing, n = k + inc) 
+      mydf <- structure(testing)
+      setDT(mydf)
+      
+      inc = inc + 1
+    }
+    
+    #Pre-Processing
+    #----------------------------------------------------------------------------------------------
+    
+    testing[["categorie"]] = factor(testing[["categorie"]])
+    tTesting <- predict(preprocessParams, newdata = testing)
+    
+    
+    #making predictions for training set
+    #----------------------------------------------------------------------------------------------
+    
+    print(paste("Gute Vorhersagen fuer Batch", i-1, ". Treffe Vorhersagen fuer Batch", i, "mit bestehender SVM." )) 
+    
+    
+    test_pred <- predict(svm_Linear, newdata = tTesting) 
+    
+    
+    confusionMatrix(table(test_pred, testing$categorie))
+    cm <- confusionMatrix(table(test_pred, testing$categorie))
+    
+    overall.accuracy <- cm$overall[['Accuracy']]
+    print("Die Genauigkeit der Vorhersagen liegt bei:" )
+    print(overall.accuracy)
+    
+    
+    
+  }
+  
+  if(overall.accuracy < v){ 
+    
+    if( streak >= good){  
+      
+      e = length(alteSVM) + 1
+      
+      name <- paste('item:',e,sep='')
+      
+      alteSVM[[name]] <- svm_Linear
+      
+      concept_zeit[e] = i
+      concept_laenge[e] = streak
+      
+      
+      print("Speichere aktuelle SVM fuer spaetere Verwendung.")
+    }
+    
+    streak = 0 
+    
+    
+    #partitioning the data
+    #----------------------------------------------------------------------------------------------
+    print(paste("Bereite Daten vor."))
+    
+    
+    training <- head(Daten, n = (i-1)*k)
+    training <- tail(training, n = k)
+    
+    mydf <- structure(training)
+    setDT(mydf)
+     
+    if( nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 2){ 
+    DOWNcount = mydf[, .(`Number of rows` = .N), by = categorie][[1,2]] 
+    UPcount = mydf[, .(`Number of rows` = .N), by = categorie][[2,2]]
+    }
+  
+    if( length(which(apply(training, 2, function(x) length(unique(x))) == 1)) != 0 || DOWNcount < 3|| UPcount < 3){
+      
+      bonusBatch = 0                        
+      
+      for(r in 2:(i-1)){  
+        training <- head(Daten, n = (i-1)*k) 
+        training <- tail(training, n = r*k) 
+        
+        mydf <- structure(training)
+        setDT(mydf)
+        DOWNcount = mydf[, .(`Number of rows` = .N), by = categorie][[1,2]]
+        UPcount = mydf[, .(`Number of rows` = .N), by = categorie][[2,2]]
+        
+        if( length(which(apply(training, 2, function(x) length(unique(x))) == 1)) == 0 || DOWNcount >= 3|| UPcount >= 3){
+          
+          bonusBatch = r-1               
+          break}
+      }
+    }
+    
+    testing <- head(Daten, n = (i*k) )                  
+    testing <- tail(testing, n = k )                   
+    
+    mydf <- structure(testing)   
+    setDT(mydf)
+    
+    inc = 1                 
+    while(nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 1){   
+      
+      testing <- head(Daten, n = (i*k) + inc) 
+      testing <- tail(testing, n = k + inc) 
+      mydf <- structure(testing)
+      setDT(mydf)
+      
+      inc = inc + 1
+    }
+    
+    #Pre-Processing
+    #----------------------------------------------------------------------------------------------
+    
+    training[["categorie"]] = factor(training[["categorie"]])
+    testing[["categorie"]] = factor(testing[["categorie"]])
+    
+    preprocessParams = preProcess(training, method=c("center","scale"))
+    print(preprocessParams)
+    
+    tTraining <- predict(preprocessParams, newdata = training)
+    
+    tTesting <- predict(preprocessParams, newdata = testing)
+    
+    print("Fuer das bestehende Modell wurden die Input-Faktoren wie folgt gewichtet:")
+    
+    importance = varImp(svm_Linear, scale=FALSE)
+    print(importance)
+    
+    #check whether SVM model schould be saved
+    #----------------------------------------------------------------------------------------------
+    
+    
+    print(paste("Schlechte Vorhersagen fuer Batch", i-1,".","Pruefe ob die Verteilung schon mal vorkam und eine gespeicherte SVM genutzt werden kann." ))
+    
+    beste = c() 
+    ist.beste = 0 
+    
+    if(length(alteSVM) >= 1){
+      
+      for(j in 1:length(alteSVM)){
+        
+        
+        #making predictions for training set
+        #----------------------------------------------------------------------------------------------
+        
+        name <- paste('item:',j,sep='')
+        
+        test_pred <- predict(alteSVM[[name]], newdata = tTesting) 
+       
+        confusionMatrix(table(test_pred, tTesting$categorie)) 
+        cm <- confusionMatrix(table(test_pred, testing$categorie)) 
+        
+        beste[j] = cm$overall[['Accuracy']]
+        
+      }
+      
+      ist.beste = which.max(beste)
+      
+      overall.accuracy <- max(beste) 
+      
+    }
+    
+    #check whether new model should be trained
+    #----------------------------------------------------------------------------------------------
+    
+    if(overall.accuracy >= v){ 
+      
+      print("Klassifizierung wiedererkannt. Lade gespeicherte SVM.")
+      
+      j = ist.beste
+      name <- paste('item:',j,sep='')
+      
+      svm_Linear <- alteSVM[[name]]
+      
+    }
+    else{ 
+      
+      print("Klassifizierung nicht wiedererkannt. Trainiere neue SVM inkl. Batch Selection.")
+      
+      svm_Linear <- train(categorie ~., data = tTraining, method = class,
+                          na.action = na.pass, scale = FALSE, trControl=trctrl, tuneLength = 10)
+      
+      print("Suche geeignete Ergaenzungen fuer den Trainingsdatensatz")
+      
+      batchCollection = c()
+      
+      for(y in bonusBatch:(i-2-begTest)){ 
+      
+        testBatch <- head(Daten, n = (( i-2-y )*k) ) 
+        testBatch <- tail(testBatch, n = k)       
+        
+        mydf <- structure(testBatch)
+        setDT(mydf)
+        
+        inc = 1  
+        while(nrow(mydf[, .(`Number of rows` = .N), by = categorie]) == 1){ 
+          
+          testBatch <- head(Daten, n = (( i-2-y )*k) + inc) 
+          testBatch <- tail(testBatch, n = k + inc) 
+          mydf <- structure(testBatch)
+          setDT(mydf)
+          
+          inc = inc + 1
+        }
+        
+        
+        #Preprocessing Test-Batch
+        testBatch[["categorie"]] = factor(testBatch[["categorie"]])
+        tTestBatch <- predict(preprocessParams, newdata = testBatch)
+        
+        #making predictions for test-batch
+        test_pred <- predict(svm_Linear, newdata = tTestBatch) 
+        
+        confusionMatrix(table(test_pred, testBatch$categorie))
+        cm <- confusionMatrix(table(test_pred, testBatch$categorie))
+        
+        overall.accuracy <- cm$overall[['Accuracy']]
+        
+        if( overall.accuracy >= grenz){   
+          
+          batchCollection = c(batchCollection,( i-2-y ))
+          
+        }
+        
+        if( length(batchCollection) >= overfit){
+          
+          if( grenz != grenz2 ){ 
+            grenz = grenz2
+            print("Die Schwelle fuer aehnliche Batches wurde erhoet.")
+          } 
+          break                                 
+        }    
+      }
+      
+      print("Es wurden")
+      print(length(batchCollection))
+      print("passende Batches gefunden.")
+      
+      
+      if( length(batchCollection) > 0){
+          
+          for(i in 1:length(batchCollection)){
+            batch <- head(Daten, n = (batchCollection[i]*k)) 
+            batch <- tail(batch, n = k)
+            training = rbind(batch,training)
+          }
+        
+        training[["categorie"]] = factor(training[["categorie"]]) 
+        
+        preprocessParams = preProcess(training, method=c("center","scale"))
+        tTraining <- predict(preprocessParams, newdata = training) 
+        tTesting <- predict(preprocessParams, newdata = testing)
+        svm_Linear <- train(categorie ~., data = tTraining, method = class,           
+                            na.action = na.pass, scale = FALSE, trControl=trctrl, tuneLength = 10)
+      }
+     
+      
+      test_pred <- predict(svm_Linear, newdata = tTesting)
+      
+      confusionMatrix(table(test_pred, testing$categorie))
+      cm <- confusionMatrix(table(test_pred, testing$categorie))
+      overall.accuracy <- cm$overall[['Accuracy']]
+      print(overall.accuracy)
+    }
+    
+    print("Fuer das neue Modell wurden die Input-Faktoren wie folgt gewichtet:")
+    importance = varImp(svm_Linear, scale=FALSE)
+    print(importance)
+  }
+  
+  #Runtime
+  
+  if( i%%35 == 0 ){
+    end_time <- Sys.time()
+    Zeit = c(Zeit,(end_time - start_time))
+    genau = c(genau,mean(g))
+  }
+}
+
+print("Zu folgenden Zeiten/Datenpaketen wurden stabile Verteilungen erkannt.")
+print(concept_zeit)
+
+print("Diese Verteilungen waren stabil fuer die nachfolgenden Anzahlen von Datenpaketen")
+print(concept_laenge)
+
+print(Zeit)
+print(genau)
+
+end_time <- Sys.time()
+print(end_time - start_time)
